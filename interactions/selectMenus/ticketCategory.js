@@ -1,100 +1,139 @@
-const { ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ChannelType } = require('discord.js');
+const { 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle, 
+    EmbedBuilder, 
+    StringSelectMenuBuilder,
+    PermissionFlagsBits 
+} = require('discord.js');
 
 module.exports = {
     customId: 'ticket_category',
     
     async execute(interaction, client) {
+        // Defer the reply first to prevent duplicate responses
         await interaction.deferReply({ ephemeral: true });
-        
-        // Cek limit tiket
-        const activeTickets = await client.database.getUserTickets(interaction.user.id);
-        if (activeTickets.length >= 3) {
-            return interaction.editReply({
-                content: '❌ Anda sudah memiliki 3 tiket aktif! Silakan tutup salah satu tiket sebelum membuat yang baru.'
-            });
-        }
-        
-        const selectedCategory = interaction.values[0];
-        const categoryId = client.config.ticketCategories[selectedCategory];
-        
-        if (!categoryId) {
-            return interaction.editReply({
-                content: '⚠️ Kategori tidak valid!'
-            });
-        }
 
         try {
-            // Buat channel tiket
-            const channel = await interaction.guild.channels.create({
-                name: `tiket-${interaction.user.username}`,
-                type: ChannelType.GuildText,
-                parent: categoryId,
+            const selectedCategory = interaction.values[0];
+            const userId = interaction.user.id;
+            
+            // Check for existing tickets
+            const userTickets = await client.database.getUserTickets(userId);
+            const existingTicket = userTickets.find(t => t.category === selectedCategory);
+            
+            if (existingTicket) {
+                const embed = new EmbedBuilder()
+                    .setColor(0xFFA500) // Orange
+                    .setTitle('🎫 Ticket Sudah Ada')
+                    .setDescription(`Anda sudah memiliki tiket terbuka untuk kategori ini!`)
+                    .addFields(
+                        { name: 'Kategori', value: this.getCategoryName(selectedCategory), inline: true },
+                        { name: 'Channel', value: `<#${existingTicket.channelId}>`, inline: true }
+                    );
+                
+                return interaction.editReply({ embeds: [embed] });
+            }
+
+            // Create ticket channel
+            const categoryId = client.config.ticketCategories[selectedCategory];
+            if (!categoryId) {
+                return interaction.editReply({
+                    content: '❌ Kategori tiket tidak valid!'
+                });
+            }
+
+            const category = await interaction.guild.channels.fetch(categoryId);
+            if (!category) {
+                return interaction.editReply({
+                    content: '❌ Kategori channel tidak ditemukan!'
+                });
+            }
+
+            const channelName = `${selectedCategory}-${interaction.user.username}`.toLowerCase();
+            const ticketChannel = await category.guild.channels.create({
+                name: channelName.slice(0, 100), // Ensure name isn't too long
+                parent: category.id,
                 permissionOverwrites: [
                     {
                         id: interaction.guild.id,
-                        deny: ['ViewChannel']
+                        deny: [PermissionFlagsBits.ViewChannel]
                     },
                     {
                         id: interaction.user.id,
-                        allow: ['ViewChannel', 'SendMessages', 'AttachFiles', 'EmbedLinks']
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.AttachFiles,
+                            PermissionFlagsBits.ReadMessageHistory
+                        ]
                     },
                     {
                         id: client.config.sellerRoleId,
-                        allow: ['ViewChannel', 'SendMessages', 'ManageMessages', 'EmbedLinks']
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ManageMessages,
+                            PermissionFlagsBits.ManageChannels
+                        ]
                     }
                 ]
             });
 
-            // Buat data tiket
-            const ticket = await client.database.createTicket({
-                channelId: channel.id,
+            // Save to database
+            const ticketData = {
                 userId: interaction.user.id,
+                channelId: ticketChannel.id,
                 category: selectedCategory,
-                userTag: interaction.user.tag
-            });
+                username: interaction.user.tag,
+                ticketNumber: client.database.getNextTicketNumber(selectedCategory)
+            };
+            await client.database.createTicket(ticketData);
 
-            // Buat embed tiket
-            const ticketEmbed = new EmbedBuilder()
-                .setTitle(`TIKET #${ticket.ticketNumber}`)
-                .setDescription(`Halo ${interaction.user}, silakan jelaskan kebutuhan Anda.\n\n**Staff akan segera menanggapi.**`)
+            // Create initial embed
+            const embed = new EmbedBuilder()
+                .setColor(0x3498DB) // Blue
+                .setTitle(`🎫 Ticket #${ticketData.ticketNumber}`)
+                .setDescription(`Halo ${interaction.user.toString()}!\n\nStaff akan segera membantu Anda.`)
                 .addFields(
                     { name: 'Kategori', value: this.getCategoryName(selectedCategory), inline: true },
-                    { name: 'Status', value: '🟢 Menunggu', inline: true },
-                    { name: 'Dibuat', value: new Date().toLocaleString('id-ID'), inline: true }
+                    { name: 'Status', value: '🟢 Terbuka', inline: true },
+                    { name: 'Dibuat pada', value: new Date().toLocaleString('id-ID'), inline: true }
                 )
-                .setColor('#5865F2')
-                .setFooter({ text: `ID: ${interaction.user.id}` })
-                .setTimestamp();
+                .setFooter({ text: `User ID: ${interaction.user.id}` });
 
-            // Buat action buttons
-            const buttons = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('claim_ticket')
-                    .setLabel('Claim Tiket')
-                    .setStyle(ButtonStyle.Success)
-                    .setEmoji('👨‍💼'),
+            // Create action buttons
+            const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                     .setCustomId('close_ticket')
-                    .setLabel('Tutup Tiket')
+                    .setLabel('Tutup Ticket')
                     .setStyle(ButtonStyle.Danger)
-                    .setEmoji('🔒')
+                    .setEmoji('🔒'),
+                new ButtonBuilder()
+                    .setCustomId('claim_ticket')
+                    .setLabel('Klaim Ticket')
+                    .setStyle(ButtonStyle.Primary)
+                    .setEmoji('🙋‍♂️')
             );
 
-            // Kirim ke channel
-            await channel.send({
-                content: `${interaction.user} <@&${client.config.sellerRoleId}>`,
-                embeds: [ticketEmbed],
-                components: [buttons]
+            // Send initial message
+            await ticketChannel.send({
+                content: `${interaction.user.toString()} <@&${client.config.sellerRoleId}>`,
+                embeds: [embed],
+                components: [row]
             });
 
+            // Respond to user
             await interaction.editReply({
-                content: `✅ Tiket Anda telah dibuat: ${channel}`
+                content: `✅ Ticket Anda telah dibuat: ${ticketChannel.toString()}`,
+                ephemeral: true
             });
 
         } catch (error) {
-            console.error('Error membuat tiket:', error);
+            console.error('Error in ticket category selection:', error);
             await interaction.editReply({
-                content: '❌ Gagal membuat tiket! Silakan coba lagi atau hubungi admin.'
+                content: '❌ Terjadi kesalahan saat membuat ticket!',
+                ephemeral: true
             });
         }
     },
